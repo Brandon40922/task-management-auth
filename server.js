@@ -1,11 +1,21 @@
 const express = require('express');
-const { db, Project, Task } = require('./database/setup');
+const session = require('express-session');
+const bcrypt = require('bcryptjs');
+const { db, User, Project, Task } = require('./database/setup');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(express.json());
+
+app.use(
+    session({
+        secret: 'my_secret_key',
+        resave: false,
+        saveUninitialized: false
+    })
+);
 
 // Test database connection
 async function testConnection() {
@@ -19,12 +29,108 @@ async function testConnection() {
 
 testConnection();
 
+// Authentication middleware
+function authMiddleware(req, res, next) {
+    if (!req.session.userId) {
+        return res.status(401).json({ error: 'Unauthorized. Please log in.' });
+    }
+
+    req.user = {
+        id: req.session.userId,
+        username: req.session.username,
+        email: req.session.email
+    };
+
+    next();
+}
+
+// AUTH ROUTES
+
+// POST /api/register - Register new user
+app.post('/api/register', async (req, res) => {
+    try {
+        const { username, email, password } = req.body;
+
+        const existingUser = await User.findOne({
+            where: { email }
+        });
+
+        if (existingUser) {
+            return res.status(400).json({ error: 'Email already exists' });
+        }
+
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        const newUser = await User.create({
+            username,
+            email,
+            password: hashedPassword
+        });
+
+        res.status(201).json({
+            message: 'User registered successfully',
+            user: {
+                id: newUser.id,
+                username: newUser.username,
+                email: newUser.email
+            }
+        });
+    } catch (error) {
+        console.error('Error registering user:', error);
+        res.status(500).json({ error: 'Failed to register user' });
+    }
+});
+
+// POST /api/login - Log in user
+app.post('/api/login', async (req, res) => {
+    try {
+        const { email, password } = req.body;
+
+        const user = await User.findOne({
+            where: { email }
+        });
+
+        if (!user) {
+            return res.status(401).json({ error: 'Invalid email or password' });
+        }
+
+        const passwordMatch = await bcrypt.compare(password, user.password);
+
+        if (!passwordMatch) {
+            return res.status(401).json({ error: 'Invalid email or password' });
+        }
+
+        req.session.userId = user.id;
+        req.session.username = user.username;
+        req.session.email = user.email;
+
+        res.json({ message: 'Login successful' });
+    } catch (error) {
+        console.error('Error logging in:', error);
+        res.status(500).json({ error: 'Failed to log in' });
+    }
+});
+
+// POST /api/logout - Log out user
+app.post('/api/logout', (req, res) => {
+    req.session.destroy((err) => {
+        if (err) {
+            console.error('Error logging out:', err);
+            return res.status(500).json({ error: 'Failed to log out' });
+        }
+
+        res.json({ message: 'Logout successful' });
+    });
+});
+
 // PROJECT ROUTES
 
-// GET /api/projects - Get all projects
-app.get('/api/projects', async (req, res) => {
+// GET /api/projects - Get all projects for logged in user
+app.get('/api/projects', authMiddleware, async (req, res) => {
     try {
-        const projects = await Project.findAll();
+        const projects = await Project.findAll({
+            where: { userId: req.user.id }
+        });
         res.json(projects);
     } catch (error) {
         console.error('Error fetching projects:', error);
@@ -48,8 +154,8 @@ app.get('/api/projects/:id', async (req, res) => {
     }
 });
 
-// POST /api/projects - Create new project
-app.post('/api/projects', async (req, res) => {
+// POST /api/projects - Create new project for logged in user
+app.post('/api/projects', authMiddleware, async (req, res) => {
     try {
         const { name, description, status, dueDate } = req.body;
         
@@ -57,7 +163,8 @@ app.post('/api/projects', async (req, res) => {
             name,
             description,
             status,
-            dueDate
+            dueDate,
+            userId: req.user.id
         });
         
         res.status(201).json(newProject);
@@ -183,7 +290,7 @@ app.put('/api/tasks/:id', async (req, res) => {
 app.delete('/api/tasks/:id', async (req, res) => {
     try {
         const deletedRowsCount = await Task.destroy({
-        where: { id: req.params.id }
+            where: { id: req.params.id }
         });
         
         if (deletedRowsCount === 0) {
